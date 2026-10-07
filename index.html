@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Notenübersicht</title>
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#fff; --ink:#1b1f27; --muted:#6b7280; --line:#e5e7eb;
+  --accent:#2f5bea; --accent-ink:#fff; --bad:#c62828;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f1115; --surface:#171a21; --ink:#e8eaee; --muted:#8b93a1; --line:#262b35;
+        --accent:#7b9bff; --accent-ink:#0f1115; --bad:#ff8a80;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:640px;margin:0 auto;padding:max(24px,env(safe-area-inset-top)) 16px 64px}
+h1{font-size:1rem;font-weight:600;margin:0;color:var(--muted)}
+button,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+header{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:24px}
+.big{font-size:3.5rem;line-height:1;font-weight:650;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.big.bad{color:var(--bad)}
+.link{background:none;border:0;color:var(--muted);cursor:pointer;padding:8px 0}
+.link:hover{color:var(--ink)}
+.link.danger:hover{color:var(--bad)}
+
+input{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%;min-width:0}
+input:focus{border-color:var(--accent)}
+.btn{background:var(--accent);color:var(--accent-ink);border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn:hover{filter:brightness(1.08)}
+
+.add{display:flex;gap:8px;margin-bottom:16px}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+details+details{border-top:1px solid var(--line)}
+summary{display:flex;align-items:baseline;gap:12px;padding:16px;cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary:hover{background:color-mix(in srgb,var(--ink) 4%,transparent)}
+.name{font-weight:600;flex:1;overflow-wrap:anywhere}
+.count{color:var(--muted);font-size:.875rem}
+.avg{font-weight:650;font-variant-numeric:tabular-nums;min-width:3ch;text-align:right}
+.avg.bad{color:var(--bad)}
+.inner{padding:0 16px 16px}
+ul{list-style:none;margin:0 0 12px;padding:0}
+li{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+li:first-child{border-top:0}
+.val{font-weight:650;font-variant-numeric:tabular-nums;min-width:3ch}
+.meta{flex:1;color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}
+.x{background:none;border:0;color:var(--muted);cursor:pointer;font-size:1.25rem;line-height:1;padding:6px 8px;border-radius:8px}
+.x:hover{color:var(--bad)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.grid .wide{grid-column:1/-1}
+.row{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
+.empty{color:var(--muted);padding:24px 16px;text-align:center}
+.msg{color:var(--bad);min-height:1.5em;margin:0 0 8px;font-size:.9rem}
+
+.auth{max-width:360px;margin:12vh auto 0}
+.auth h1{margin-bottom:16px;font-size:1.5rem;color:var(--ink)}
+.auth form{display:grid;gap:8px}
+@media (prefers-reduced-motion:no-preference){.btn{transition:filter .15s}}
+</style>
+</head>
+<body>
+<main id="app"></main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// Aus Supabase: Project Settings → API (URL und Publishable Key / anon key)
+const SUPABASE_URL = 'https://lellociivmgvexmmphzc.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_c5YmH7TkNwip1rkQIA40pA_tlIc5Yzs';
+
+const app = document.getElementById('app');
+let subjects = [];
+const open = new Set();
+
+// ---------- Helfer ----------
+const el = (tag, props = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c);
+  return e;
+};
+const fmt2 = n => n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = n => n.toLocaleString('de-DE', { maximumFractionDigits: 2 });
+const num = s => parseFloat(String(s).replace(',', '.'));
+const today = () => new Date().toLocaleDateString('sv-SE');
+const deDate = d => d.split('-').reverse().join('.');
+
+const avg = grades => {
+  const w = grades.reduce((a, g) => a + g.weight, 0);
+  return w ? grades.reduce((a, g) => a + g.value * g.weight, 0) / w : null;
+};
+const overall = () => {
+  const a = subjects.map(s => avg(s.grades)).filter(x => x != null);
+  return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+};
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const check = r => {
+  if (r.error) throw Object.assign(new Error(r.error.message), { status: r.status });
+  return r.data;
+};
+
+async function api(action, d) {
+  switch (action) {
+    case 'session': {
+      const { data } = await sb.auth.getSession();
+      return { loggedIn: !!data.session, canRegister: false };
+    }
+    case 'login': {
+      const r = await sb.auth.signInWithPassword({ email: d.username.trim(), password: d.password });
+      if (r.error) throw new Error('E-Mail oder Passwort ist falsch.');
+      return {};
+    }
+    case 'logout':
+      await sb.auth.signOut();
+      return {};
+    case 'data': {
+      const rows = check(await sb.from('subjects').select('id,name,grades(id,value,weight,title,date)'));
+      return {
+        subjects: rows
+          .map(s => ({ ...s, grades: s.grades.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'de')),
+      };
+    }
+    case 'subject_add': {
+      const name = d.name.trim();
+      if (!name || name.length > 60) throw new Error('Der Name muss 1 bis 60 Zeichen lang sein.');
+      check(await sb.from('subjects').insert({ name }));
+      return {};
+    }
+    case 'subject_rename': {
+      const name = d.name.trim();
+      if (!name || name.length > 60) throw new Error('Der Name muss 1 bis 60 Zeichen lang sein.');
+      check(await sb.from('subjects').update({ name }).eq('id', d.id));
+      return {};
+    }
+    case 'subject_delete':
+      check(await sb.from('subjects').delete().eq('id', d.id));
+      return {};
+    case 'grade_add': {
+      if (!(d.value >= 1 && d.value <= 6)) throw new Error('Die Note muss zwischen 1 und 6 liegen.');
+      if (!(d.weight > 0 && d.weight <= 100)) throw new Error('Die Gewichtung muss größer als 0 und höchstens 100 sein.');
+      check(await sb.from('grades').insert({
+        subject_id: d.subject_id, value: d.value, weight: d.weight,
+        title: d.title.trim().slice(0, 80), date: d.date || today(),
+      }));
+      return {};
+    }
+    case 'grade_delete':
+      check(await sb.from('grades').delete().eq('id', d.id));
+      return {};
+  }
+}
+
+let msgTimer;
+function showError(text) {
+  const m = document.getElementById('msg');
+  if (!m) return;
+  m.textContent = text;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => (m.textContent = ''), 5000);
+}
+
+async function run(fn) {
+  try { await fn(); await load(); }
+  catch (e) { if (e.status === 401) return init(); showError(e.message); }
+}
+
+// ---------- Login ----------
+function renderAuth(canRegister) {
+  const user = el('input', { type: 'email', placeholder: 'E-Mail', autocomplete: 'username', required: '' });
+  const pass = el('input', {
+    type: 'password', placeholder: canRegister ? 'Passwort (mind. 8 Zeichen)' : 'Passwort',
+    autocomplete: canRegister ? 'new-password' : 'current-password', required: '',
+  });
+  const form = el('form', {
+    onsubmit: async e => {
+      e.preventDefault();
+      try {
+        await api(canRegister ? 'register' : 'login', { username: user.value, password: pass.value });
+        await init();
+      } catch (err) { showError(err.message); }
+    },
+  }, user, pass, el('p', { class: 'msg', id: 'msg' }),
+     el('button', { class: 'btn', type: 'submit' }, canRegister ? 'Konto erstellen' : 'Anmelden'));
+  app.replaceChildren(el('div', { class: 'auth' },
+    el('h1', {}, canRegister ? 'Konto erstellen' : 'Anmelden'), form));
+}
+
+// ---------- Hauptansicht ----------
+function subjectView(s) {
+  const a = avg(s.grades);
+  const d = el('details', {});
+  d.open = open.has(s.id);
+  d.addEventListener('toggle', () => (d.open ? open.add(s.id) : open.delete(s.id)));
+
+  d.append(el('summary', {},
+    el('span', { class: 'name' }, s.name),
+    el('span', { class: 'count' }, `${s.grades.length} ${s.grades.length === 1 ? 'Note' : 'Noten'}`),
+    el('span', { class: 'avg' + (a > 4.49 ? ' bad' : '') }, a == null ? '–' : fmt2(a))));
+
+  const list = el('ul', {}, s.grades.map(g => el('li', {},
+    el('span', { class: 'val' }, fmt(g.value)),
+    el('span', { class: 'meta' },
+      [g.title, deDate(g.date), g.weight !== 1 ? `Gewicht ${fmt(g.weight)}` : null].filter(Boolean).join(' · ')),
+    el('button', {
+      class: 'x', 'aria-label': 'Note löschen',
+      onclick: () => run(() => api('grade_delete', { id: g.id })),
+    }, '×'))));
+
+  const note = el('input', { placeholder: 'Note', inputmode: 'decimal', required: '', 'aria-label': 'Note' });
+  const weight = el('input', { placeholder: 'Gewicht', inputmode: 'decimal', value: '1', 'aria-label': 'Gewichtung' });
+  const title = el('input', { placeholder: 'Bezeichnung (optional)', class: 'wide', 'aria-label': 'Bezeichnung' });
+  const date = el('input', { type: 'date', value: today(), 'aria-label': 'Datum' });
+  const form = el('form', {
+    onsubmit: e => {
+      e.preventDefault();
+      run(() => api('grade_add', {
+        subject_id: s.id, value: num(note.value), weight: num(weight.value) || 1,
+        title: title.value, date: date.value,
+      }));
+    },
+  }, el('div', { class: 'grid' }, note, weight, title, date),
+     el('button', { class: 'btn', type: 'submit' }, 'Note speichern'));
+
+  const actions = el('div', { class: 'row' },
+    el('button', {
+      class: 'link', type: 'button',
+      onclick: () => {
+        const n = prompt('Neuer Name', s.name);
+        if (n && n.trim()) run(() => api('subject_rename', { id: s.id, name: n }));
+      },
+    }, 'Umbenennen'),
+    el('button', {
+      class: 'link danger', type: 'button',
+      onclick: () => {
+        if (confirm(`„${s.name}“ mit allen Noten löschen?`)) run(() => api('subject_delete', { id: s.id }));
+      },
+    }, 'Fach löschen'));
+
+  d.append(el('div', { class: 'inner' }, s.grades.length ? list : null, form, actions));
+  return d;
+}
+
+function render() {
+  const o = overall();
+  const nameInput = el('input', { placeholder: 'Neues Fach', 'aria-label': 'Name des Fachs', required: '' });
+
+  app.replaceChildren(
+    el('header', {},
+      el('div', {}, el('h1', {}, 'Gesamtschnitt'),
+        el('div', { class: 'big' + (o > 4.49 ? ' bad' : '') }, o == null ? '–' : fmt2(o))),
+      el('button', {
+        class: 'link',
+        onclick: async () => { await api('logout', {}); init(); },
+      }, 'Abmelden')),
+    el('form', {
+      class: 'add',
+      onsubmit: e => { e.preventDefault(); run(() => api('subject_add', { name: nameInput.value })); },
+    }, nameInput, el('button', { class: 'btn', type: 'submit' }, 'Hinzufügen')),
+    el('p', { class: 'msg', id: 'msg' }),
+    subjects.length
+      ? el('div', { class: 'list' }, subjects.map(subjectView))
+      : el('div', { class: 'list' }, el('p', { class: 'empty' }, 'Noch keine Fächer. Lege oben dein erstes Fach an.')));
+}
+
+async function load() {
+  subjects = (await api('data')).subjects;
+  render();
+}
+
+async function init() {
+  try {
+    const s = await api('session');
+    if (!s.loggedIn) return renderAuth(s.canRegister);
+    await load();
+  } catch (e) {
+    app.replaceChildren(el('p', { class: 'empty' }, 'Server nicht erreichbar: ' + e.message));
+  }
+}
+init();
+</script>
+</body>
+</html>
